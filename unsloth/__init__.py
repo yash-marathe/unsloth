@@ -16,33 +16,15 @@ import warnings, importlib, sys
 from packaging.version import Version
 import os, re, subprocess, inspect
 import numpy as np
-
-# Unsloth currently does not work on multi GPU setups - sadly we are a 2 brother team so
-# enabling it will require much more work, so we have to prioritize. Please understand!
-# We do have a beta version, which you can contact us about!
-# Thank you for your understanding and we appreciate it immensely!
+import torch  # Import Torch early
 
 # Fixes https://github.com/unslothai/unsloth/issues/1266
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
-if "CUDA_VISIBLE_DEVICES" in os.environ:
+# REMOVE single-GPU restrictions.  Let PyTorch / Accelerate handle devices.
+# We'll check for CUDA availability later.
+if "CUDA_DEVICE_ORDER" not in os.environ:
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    devices = os.environ["CUDA_VISIBLE_DEVICES"]
-    # Check if there are multiple cuda devices set in env
-    if not devices.isdigit():
-        first_id = devices.split(",")[0]
-        warnings.warn(
-            f"Unsloth: 'CUDA_VISIBLE_DEVICES' is currently {devices} \n"\
-            "Unsloth currently does not support multi GPU setups - but we are working on it!\n"\
-            "Multiple CUDA devices detected but we require a single device.\n"\
-            f"We will override CUDA_VISIBLE_DEVICES to first device: {first_id}."
-        )
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(first_id)
-else:
-    # warnings.warn("Unsloth: 'CUDA_VISIBLE_DEVICES' is not set. We shall set it ourselves.")
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-pass
 
 # Reduce VRAM usage by reducing fragmentation
 # And optimize pinning of memory
@@ -50,7 +32,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = \
     "expandable_segments:True,"\
     "roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
 
-# [TODO] Check why some GPUs don't work
+# [TODO] Check why some GPUs don't work  (This TODO is in the original code)
 #    "pinned_use_cuda_host_register:True,"\
 #    "pinned_num_register_threads:8"
 
@@ -62,6 +44,8 @@ pass
 # Log Unsloth is being used
 os.environ["UNSLOTH_IS_PRESENT"] = "1"
 
+
+# Check for PyTorch installation *before* potentially complex CUDA checks
 try:
     import torch
 except ModuleNotFoundError:
@@ -73,28 +57,35 @@ except Exception as exception:
     raise exception
 pass
 
-# We support Pytorch 2
-# Fixes https://github.com/unslothai/unsloth/issues/38
+# Check for PyTorch version.  Must be >= 2.0
 torch_version = torch.__version__.split(".")
-major_torch, minor_torch = torch_version[0], torch_version[1]
-major_torch, minor_torch = int(major_torch), int(minor_torch)
-if (major_torch < 2):
+major_torch, minor_torch = int(torch_version[0]), int(torch_version[1])
+if major_torch < 2:
     raise ImportError("Unsloth only supports Pytorch 2 for now. Please update your Pytorch to 2.1.\n"\
                       "We have some installation instructions on our Github page.")
 elif (major_torch == 2) and (minor_torch < 2):
-    # Disable expandable_segments
+    # Disable expandable_segments for older PyTorch 2 versions
     del os.environ["PYTORCH_CUDA_ALLOC_CONF"]
 pass
 
-# First check if CUDA is available ie a NVIDIA GPU is seen
+
+# NOW check for CUDA availability.
 if not torch.cuda.is_available():
     raise NotImplementedError("Unsloth: No NVIDIA GPU found? Unsloth currently only supports GPUs!")
+
+# Check the number of available GPUs.  Warn, but don't error out.
+num_gpus = torch.cuda.device_count()
+if num_gpus > 1:
+    warnings.warn(
+        "Unsloth: Multiple GPUs detected.  Unsloth's multi-GPU support is experimental.\n"
+        "Ensure you are using `accelerate launch` or setting `CUDA_VISIBLE_DEVICES` correctly."
+    )
+
 
 # Fix Xformers performance issues since 0.0.25
 import importlib.util
 from pathlib import Path
 from importlib.metadata import version as importlib_version
-from packaging.version import Version
 try:
     xformers_version = importlib_version("xformers")
     if Version(xformers_version) < Version("0.0.29"):
@@ -134,7 +125,8 @@ else:
     torch.cuda.is_bf16_supported = is_bf16_supported
 pass
 
-# For Gradio HF Spaces?
+
+# For Gradio HF Spaces? (This check is likely unnecessary)
 # if "SPACE_AUTHOR_NAME" not in os.environ and "SPACE_REPO_NAME" not in os.environ:
 import triton
 libcuda_dirs = lambda: None
@@ -208,6 +200,7 @@ try:
 except:
     raise ImportError("Unsloth: Please install unsloth_zoo via `pip install unsloth_zoo`")
 pass
+
 
 from .models import *
 from .save import *
